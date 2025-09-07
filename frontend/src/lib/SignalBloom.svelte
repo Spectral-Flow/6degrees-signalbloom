@@ -7,33 +7,60 @@
 	let connected = false;
 	let signals = [];
 	let connectionStatus = 'Connecting...';
+	let reconnectAttempts = 0;
+	let maxReconnectAttempts = 5;
+	let reconnectTimeout;
 
-	// WebSocket connection management
+	// WebSocket connection management with improved error handling
 	function connectWebSocket() {
 		try {
-			websocket = new WebSocket('ws://localhost:8000/ws');
+			// Clear any existing timeout
+			if (reconnectTimeout) {
+				clearTimeout(reconnectTimeout);
+			}
+
+			const wsUrl = getWebSocketUrl();
+			websocket = new WebSocket(wsUrl);
 			
 			websocket.onopen = () => {
 				connected = true;
 				connectionStatus = 'Connected to Signal Bloom';
+				reconnectAttempts = 0; // Reset counter on successful connection
+				console.log('WebSocket connected successfully');
 			};
 			
 			websocket.onmessage = (event) => {
-				const data = JSON.parse(event.data);
-				if (data.type === 'signal') {
-					// Add new signal to the front of the array for latest-first display
-					signals = [data, ...signals];
+				try {
+					const data = JSON.parse(event.data);
+					
+					if (data.type === 'signal') {
+						// Add new signal to the front of the array for latest-first display
+						signals = [data, ...signals];
+						
+						// Limit stored signals to prevent memory issues
+						if (signals.length > 100) {
+							signals = signals.slice(0, 100);
+						}
+					} else if (data.type === 'error') {
+						console.error('Server error:', data.message);
+						connectionStatus = `Server error: ${data.message}`;
+					}
+				} catch (error) {
+					console.error('Error parsing WebSocket message:', error);
 				}
 			};
 			
-			websocket.onclose = () => {
+			websocket.onclose = (event) => {
 				connected = false;
-				connectionStatus = 'Disconnected';
-				// Attempt reconnection after 3 seconds
-				setTimeout(() => {
-					connectionStatus = 'Reconnecting...';
-					connectWebSocket();
-				}, 3000);
+				
+				if (event.wasClean) {
+					connectionStatus = 'Disconnected';
+					console.log('WebSocket closed cleanly');
+				} else {
+					connectionStatus = 'Connection lost';
+					console.warn('WebSocket closed unexpectedly:', event.code, event.reason);
+					attemptReconnection();
+				}
 			};
 			
 			websocket.onerror = (error) => {
@@ -45,19 +72,56 @@
 			console.error('Failed to create WebSocket:', error);
 			connected = false;
 			connectionStatus = 'Connection failed';
+			attemptReconnection();
 		}
 	}
+
+	function getWebSocketUrl() {
+		// Determine WebSocket URL based on current location
+		const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+		const host = window.location.hostname;
+		const port = process.env.NODE_ENV === 'development' ? '8000' : window.location.port;
+		return `${protocol}//${host}:${port}/ws`;
+	}
+
+	function attemptReconnection() {
+		if (reconnectAttempts < maxReconnectAttempts) {
+			const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff
+			reconnectAttempts++;
+			
+			connectionStatus = `Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`;
+			
+			reconnectTimeout = setTimeout(() => {
+				connectWebSocket();
+			}, delay);
+		} else {
+			connectionStatus = 'Connection failed - Please refresh the page';
+		}
+	}
+
+	function resetConnection() {
+		reconnectAttempts = 0;
+		connectWebSocket();
+	}
 	
-	// Send signal to backend
+	// Send signal to backend with error handling
 	function sendSignal(text) {
-		if (websocket && connected) {
-			const signal = {
-				type: 'signal',
-				text: text,
-				x: Math.random() * 90 + 5, // 5-95% to keep signals within bounds
-				y: Math.random() * 90 + 5
-			};
-			websocket.send(JSON.stringify(signal));
+		if (websocket && connected && websocket.readyState === WebSocket.OPEN) {
+			try {
+				const signal = {
+					type: 'signal',
+					text: text.trim(),
+					x: Math.random() * 90 + 5, // 5-95% to keep signals within bounds
+					y: Math.random() * 90 + 5
+				};
+				websocket.send(JSON.stringify(signal));
+			} catch (error) {
+				console.error('Error sending signal:', error);
+				connectionStatus = 'Send failed - reconnecting...';
+				attemptReconnection();
+			}
+		} else {
+			console.warn('Cannot send signal: WebSocket not connected');
 		}
 	}
 	
@@ -66,8 +130,11 @@
 		
 		// Cleanup on component destroy
 		return () => {
+			if (reconnectTimeout) {
+				clearTimeout(reconnectTimeout);
+			}
 			if (websocket) {
-				websocket.close();
+				websocket.close(1000, 'Component unmounting');
 			}
 		};
 	});
@@ -77,8 +144,15 @@
 	<header class="bloom-header">
 		<h1>🌸 Signal Bloom</h1>
 		<p class="subtitle">A living garden of shared sparks</p>
-		<div class="status" class:connected class:disconnected={!connected}>
-			{connectionStatus}
+		<div class="status-container">
+			<div class="status" class:connected class:disconnected={!connected}>
+				{connectionStatus}
+			</div>
+			{#if !connected && reconnectAttempts >= maxReconnectAttempts}
+				<button class="reconnect-btn" on:click={resetConnection}>
+					↻ Reconnect
+				</button>
+			{/if}
 		</div>
 	</header>
 	
@@ -153,6 +227,14 @@
 		font-weight: 300;
 	}
 	
+	.status-container {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	
 	.status {
 		font-size: 0.9rem;
 		padding: 0.25rem 1rem;
@@ -169,6 +251,27 @@
 	.status.disconnected {
 		background: rgba(255, 0, 0, 0.2);
 		color: #ffb3b3;
+	}
+	
+	.reconnect-btn {
+		background: linear-gradient(135deg, #667eea, #764ba2);
+		border: none;
+		color: white;
+		padding: 0.5rem 1rem;
+		border-radius: 20px;
+		font-size: 0.8rem;
+		cursor: pointer;
+		transition: all 0.3s ease;
+		box-shadow: 0 2px 10px rgba(102, 126, 234, 0.3);
+	}
+	
+	.reconnect-btn:hover {
+		transform: translateY(-1px);
+		box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+	}
+	
+	.reconnect-btn:active {
+		transform: translateY(0);
 	}
 	
 	.bloom-garden {

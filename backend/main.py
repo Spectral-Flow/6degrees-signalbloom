@@ -5,72 +5,209 @@ A real-time WebSocket server for broadcasting creative signals.
 
 import json
 import asyncio
-from typing import Dict, Set
+import logging
+from typing import Dict, Set, Optional
 from datetime import datetime
 from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.middleware.cors import CORSMiddleware
 import uvicorn
+
+from config import Config
+from database import db_manager, Signal
+from voice import voice_processor
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, Config.LOG_LEVEL.upper()),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 class SignalBloomManager:
-    """Manages connections and signal broadcasting."""
+    """Manages connections and signal broadcasting with database persistence."""
     
     def __init__(self):
         self.connections: Set[WebSocket] = set()
-        self.signals: Dict[str, dict] = {}
+        self.signals: Dict[str, dict] = {}  # In-memory cache
+        self.max_signals = Config.MAX_SIGNALS
+        logger.info("SignalBloomManager initialized")
+    
+    async def initialize(self):
+        """Initialize database and load recent signals"""
+        try:
+            await db_manager.initialize()
+            
+            # Load recent signals from database
+            db_signals = await db_manager.get_recent_signals(limit=100)
+            for db_signal in db_signals:
+                self.signals[db_signal.id] = db_signal.to_dict()
+            
+            logger.info(f"Loaded {len(db_signals)} signals from database")
+        except Exception as e:
+            logger.error(f"Failed to initialize SignalBloomManager: {e}")
+            raise
     
     async def connect(self, websocket: WebSocket):
         """Add a new WebSocket connection."""
-        await websocket.accept()
-        self.connections.add(websocket)
-        
-        # Send existing signals to new connection
-        for signal_id, signal_data in self.signals.items():
-            await websocket.send_text(json.dumps({
-                "type": "signal",
-                "id": signal_id,
-                **signal_data
-            }))
+        try:
+            await websocket.accept()
+            self.connections.add(websocket)
+            logger.info(f"New WebSocket connection. Total connections: {len(self.connections)}")
+            
+            # Send existing signals to new connection
+            for signal_id, signal_data in self.signals.items():
+                try:
+                    message = json.dumps({
+                        "type": "signal",
+                        "id": signal_id,
+                        **signal_data
+                    })
+                    await websocket.send_text(message)
+                except Exception as e:
+                    logger.error(f"Error sending existing signal to new connection: {e}")
+                    break
+        except Exception as e:
+            logger.error(f"Error accepting WebSocket connection: {e}")
+            raise
     
     def disconnect(self, websocket: WebSocket):
         """Remove WebSocket connection."""
         self.connections.discard(websocket)
+        logger.info(f"WebSocket disconnected. Total connections: {len(self.connections)}")
+    
+    def _validate_signal_data(self, signal_data: dict) -> bool:
+        """Validate signal data format."""
+        if not isinstance(signal_data, dict):
+            return False
+        
+        text = signal_data.get("text", "")
+        if not isinstance(text, str) or len(text.strip()) == 0 or len(text) > Config.MAX_SIGNAL_LENGTH:
+            return False
+        
+        x = signal_data.get("x", 50)
+        y = signal_data.get("y", 50)
+        if not (isinstance(x, (int, float)) and 0 <= x <= 100):
+            return False
+        if not (isinstance(y, (int, float)) and 0 <= y <= 100):
+            return False
+        
+        return True
     
     async def broadcast_signal(self, signal_data: dict):
-        """Broadcast a new signal to all connected clients."""
-        signal_id = f"signal_{len(self.signals)}_{datetime.now().timestamp()}"
-        
-        # Store signal in memory
-        self.signals[signal_id] = {
-            "text": signal_data.get("text", ""),
-            "timestamp": datetime.now().isoformat(),
-            "x": signal_data.get("x", 50),
-            "y": signal_data.get("y", 50)
-        }
-        
-        # Broadcast to all connections
-        message = json.dumps({
-            "type": "signal",
-            "id": signal_id,
-            **self.signals[signal_id]
-        })
-        
-        # Remove disconnected clients
-        disconnected = set()
-        for connection in self.connections:
+        """Broadcast a new signal to all connected clients and save to database."""
+        try:
+            # Validate input
+            if not self._validate_signal_data(signal_data):
+                logger.warning(f"Invalid signal data received: {signal_data}")
+                return
+            
+            # Generate unique signal ID
+            signal_id = f"signal_{len(self.signals)}_{datetime.now().timestamp()}"
+            
+            # Prepare signal data
+            processed_signal = {
+                "id": signal_id,
+                "text": signal_data["text"].strip(),
+                "timestamp": datetime.now().isoformat(),
+                "x": max(0, min(100, signal_data.get("x", 50))),
+                "y": max(0, min(100, signal_data.get("y", 50)))
+            }
+            
+            # Save to database
             try:
-                await connection.send_text(message)
-            except:
-                disconnected.add(connection)
-        
-        # Clean up disconnected clients
-        self.connections -= disconnected
+                await db_manager.save_signal(processed_signal)
+            except Exception as e:
+                logger.error(f"Failed to save signal to database: {e}")
+                # Continue with broadcasting even if database save fails
+            
+            # Store in memory cache
+            self.signals[signal_id] = processed_signal
+            
+            # Cleanup old signals if needed
+            if len(self.signals) >= self.max_signals:
+                await self._cleanup_signals()
+            
+            # Broadcast to all connections
+            message = json.dumps({
+                "type": "signal",
+                **processed_signal
+            })
+            
+            # Remove disconnected clients and send to active ones
+            disconnected = set()
+            for connection in self.connections:
+                try:
+                    await connection.send_text(message)
+                except Exception as e:
+                    logger.warning(f"Failed to send message to connection: {e}")
+                    disconnected.add(connection)
+            
+            # Clean up disconnected clients
+            self.connections -= disconnected
+            if disconnected:
+                logger.info(f"Removed {len(disconnected)} disconnected clients")
+            
+            logger.info(f"Broadcast signal {signal_id} to {len(self.connections)} connections")
+            
+        except Exception as e:
+            logger.error(f"Error broadcasting signal: {e}")
+            raise
+    
+    async def _cleanup_signals(self):
+        """Clean up old signals from memory and database"""
+        try:
+            # Remove oldest signals from memory (simple FIFO)
+            signals_to_remove = len(self.signals) - (self.max_signals // 2)
+            if signals_to_remove > 0:
+                oldest_keys = list(self.signals.keys())[:signals_to_remove]
+                for key in oldest_keys:
+                    del self.signals[key]
+                logger.info(f"Cleaned up {len(oldest_keys)} old signals from memory")
+            
+            # Cleanup database
+            cleaned_count = await db_manager.cleanup_old_signals()
+            if cleaned_count > 0:
+                logger.info(f"Cleaned up {cleaned_count} old signals from database")
+                
+        except Exception as e:
+            logger.error(f"Error during signal cleanup: {e}")
+    
+    async def shutdown(self):
+        """Cleanup resources on shutdown"""
+        try:
+            await db_manager.close()
+            logger.info("SignalBloomManager shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
 
 
 # Global manager instance
 bloom_manager = SignalBloomManager()
+
+
+async def startup_event():
+    """Initialize application on startup"""
+    try:
+        await bloom_manager.initialize()
+        await voice_processor.initialize()
+        logger.info("Application startup complete")
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
+
+
+async def shutdown_event():
+    """Cleanup on application shutdown"""
+    try:
+        await bloom_manager.shutdown()
+        await voice_processor.close()
+        logger.info("Application shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 
 async def websocket_endpoint(websocket: WebSocket):
@@ -80,25 +217,130 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             # Receive message from client
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            if message.get("type") == "signal":
-                # Broadcast new signal to all clients
-                await bloom_manager.broadcast_signal(message)
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+                
+                if message.get("type") == "signal":
+                    # Broadcast new signal to all clients
+                    await bloom_manager.broadcast_signal(message)
+                else:
+                    logger.warning(f"Unknown message type: {message.get('type')}")
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON received: {e}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Invalid JSON format"
+                }))
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}")
+                break
                 
     except WebSocketDisconnect:
+        logger.info("WebSocket disconnected normally")
+    except Exception as e:
+        logger.error(f"Unexpected WebSocket error: {e}")
+    finally:
         bloom_manager.disconnect(websocket)
 
 
 async def status_endpoint(request):
     """Health check and status endpoint."""
-    return JSONResponse({
-        "status": "healthy",
-        "connections": len(bloom_manager.connections),
-        "signals": len(bloom_manager.signals),
-        "timestamp": datetime.now().isoformat()
-    })
+    try:
+        voice_available = await voice_processor.elevenlabs_client.is_available() if voice_processor.voice_enabled else False
+        
+        return JSONResponse({
+            "status": "healthy",
+            "service": "Signal Bloom Backend",
+            "version": "1.0.0",
+            "connections": len(bloom_manager.connections),
+            "signals": len(bloom_manager.signals),
+            "timestamp": datetime.now().isoformat(),
+            "features": {
+                "voice_enabled": voice_processor.voice_enabled,
+                "voice_available": voice_available,
+                "database_enabled": True
+            },
+            "uptime": "N/A"  # TODO: Add uptime tracking
+        })
+    except Exception as e:
+        logger.error(f"Error in status endpoint: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": "Health check failed"
+        }, status_code=500)
+
+
+async def voice_status_endpoint(request):
+    """Voice service status endpoint."""
+    try:
+        if not voice_processor.voice_enabled:
+            return JSONResponse({
+                "voice_enabled": False,
+                "message": "Voice processing not configured"
+            })
+        
+        available = await voice_processor.elevenlabs_client.is_available()
+        voices = await voice_processor.get_available_voices() if available else None
+        
+        return JSONResponse({
+            "voice_enabled": True,
+            "voice_available": available,
+            "voices_count": len(voices) if voices else 0,
+            "current_voice_id": voice_processor.elevenlabs_client.voice_id
+        })
+    except Exception as e:
+        logger.error(f"Error in voice status endpoint: {e}")
+        return JSONResponse({
+            "error": "Voice status check failed"
+        }, status_code=500)
+
+
+async def text_to_speech_endpoint(request):
+    """Convert text to speech endpoint."""
+    try:
+        if not voice_processor.voice_enabled:
+            return JSONResponse({
+                "error": "Voice processing not enabled"
+            }, status_code=503)
+        
+        # Get text from query params or JSON body
+        text = request.query_params.get('text')
+        if not text:
+            try:
+                body = await request.json()
+                text = body.get('text')
+            except:
+                pass
+        
+        if not text:
+            return JSONResponse({
+                "error": "No text provided"
+            }, status_code=400)
+        
+        # Generate speech
+        audio_data = await voice_processor.process_signal_to_speech(text)
+        
+        if audio_data:
+            from starlette.responses import Response
+            return Response(
+                audio_data,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": "inline; filename=speech.mp3"
+                }
+            )
+        else:
+            return JSONResponse({
+                "error": "Failed to generate speech"
+            }, status_code=500)
+            
+    except Exception as e:
+        logger.error(f"Error in TTS endpoint: {e}")
+        return JSONResponse({
+            "error": "TTS processing failed"
+        }, status_code=500)
 
 
 async def frontend_endpoint(request):
@@ -180,11 +422,37 @@ async def frontend_endpoint(request):
 routes = [
     Route("/", frontend_endpoint),
     Route("/status", status_endpoint),
+    Route("/voice/status", voice_status_endpoint),
+    Route("/voice/tts", text_to_speech_endpoint, methods=["GET", "POST"]),
     WebSocketRoute("/ws", websocket_endpoint),
 ]
 
-app = Starlette(debug=True, routes=routes)
+# Add CORS middleware for development
+app = Starlette(debug=Config.DEBUG, routes=routes)
+
+# Add startup and shutdown events
+app.add_event_handler("startup", startup_event)
+app.add_event_handler("shutdown", shutdown_event)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=Config.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    logger.info("Starting Signal Bloom Backend Server")
+    try:
+        uvicorn.run(
+            app, 
+            host=Config.HOST, 
+            port=Config.PORT, 
+            log_level=Config.LOG_LEVEL,
+            access_log=True
+        )
+    except Exception as e:
+        logger.error(f"Failed to start server: {e}")
+        raise

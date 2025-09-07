@@ -15,22 +15,41 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from starlette.middleware.cors import CORSMiddleware
 import uvicorn
 
+from config import Config
+from database import db_manager, Signal
+from voice import voice_processor
+
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, Config.LOG_LEVEL.upper()),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
 class SignalBloomManager:
-    """Manages connections and signal broadcasting."""
+    """Manages connections and signal broadcasting with database persistence."""
     
     def __init__(self):
         self.connections: Set[WebSocket] = set()
-        self.signals: Dict[str, dict] = {}
-        self.max_signals = 1000  # Limit signal storage
+        self.signals: Dict[str, dict] = {}  # In-memory cache
+        self.max_signals = Config.MAX_SIGNALS
         logger.info("SignalBloomManager initialized")
+    
+    async def initialize(self):
+        """Initialize database and load recent signals"""
+        try:
+            await db_manager.initialize()
+            
+            # Load recent signals from database
+            db_signals = await db_manager.get_recent_signals(limit=100)
+            for db_signal in db_signals:
+                self.signals[db_signal.id] = db_signal.to_dict()
+            
+            logger.info(f"Loaded {len(db_signals)} signals from database")
+        except Exception as e:
+            logger.error(f"Failed to initialize SignalBloomManager: {e}")
+            raise
     
     async def connect(self, websocket: WebSocket):
         """Add a new WebSocket connection."""
@@ -66,7 +85,7 @@ class SignalBloomManager:
             return False
         
         text = signal_data.get("text", "")
-        if not isinstance(text, str) or len(text.strip()) == 0 or len(text) > 1000:
+        if not isinstance(text, str) or len(text.strip()) == 0 or len(text) > Config.MAX_SIGNAL_LENGTH:
             return False
         
         x = signal_data.get("x", 50)
@@ -79,7 +98,7 @@ class SignalBloomManager:
         return True
     
     async def broadcast_signal(self, signal_data: dict):
-        """Broadcast a new signal to all connected clients."""
+        """Broadcast a new signal to all connected clients and save to database."""
         try:
             # Validate input
             if not self._validate_signal_data(signal_data):
@@ -89,26 +108,33 @@ class SignalBloomManager:
             # Generate unique signal ID
             signal_id = f"signal_{len(self.signals)}_{datetime.now().timestamp()}"
             
-            # Store signal in memory with cleanup if needed
-            if len(self.signals) >= self.max_signals:
-                # Remove oldest signals (simple FIFO)
-                oldest_keys = list(self.signals.keys())[:100]
-                for key in oldest_keys:
-                    del self.signals[key]
-                logger.info(f"Cleaned up {len(oldest_keys)} old signals")
-            
-            self.signals[signal_id] = {
+            # Prepare signal data
+            processed_signal = {
+                "id": signal_id,
                 "text": signal_data["text"].strip(),
                 "timestamp": datetime.now().isoformat(),
                 "x": max(0, min(100, signal_data.get("x", 50))),
                 "y": max(0, min(100, signal_data.get("y", 50)))
             }
             
+            # Save to database
+            try:
+                await db_manager.save_signal(processed_signal)
+            except Exception as e:
+                logger.error(f"Failed to save signal to database: {e}")
+                # Continue with broadcasting even if database save fails
+            
+            # Store in memory cache
+            self.signals[signal_id] = processed_signal
+            
+            # Cleanup old signals if needed
+            if len(self.signals) >= self.max_signals:
+                await self._cleanup_signals()
+            
             # Broadcast to all connections
             message = json.dumps({
                 "type": "signal",
-                "id": signal_id,
-                **self.signals[signal_id]
+                **processed_signal
             })
             
             # Remove disconnected clients and send to active ones
@@ -130,10 +156,58 @@ class SignalBloomManager:
         except Exception as e:
             logger.error(f"Error broadcasting signal: {e}")
             raise
+    
+    async def _cleanup_signals(self):
+        """Clean up old signals from memory and database"""
+        try:
+            # Remove oldest signals from memory (simple FIFO)
+            signals_to_remove = len(self.signals) - (self.max_signals // 2)
+            if signals_to_remove > 0:
+                oldest_keys = list(self.signals.keys())[:signals_to_remove]
+                for key in oldest_keys:
+                    del self.signals[key]
+                logger.info(f"Cleaned up {len(oldest_keys)} old signals from memory")
+            
+            # Cleanup database
+            cleaned_count = await db_manager.cleanup_old_signals()
+            if cleaned_count > 0:
+                logger.info(f"Cleaned up {cleaned_count} old signals from database")
+                
+        except Exception as e:
+            logger.error(f"Error during signal cleanup: {e}")
+    
+    async def shutdown(self):
+        """Cleanup resources on shutdown"""
+        try:
+            await db_manager.close()
+            logger.info("SignalBloomManager shutdown complete")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
 
 
 # Global manager instance
 bloom_manager = SignalBloomManager()
+
+
+async def startup_event():
+    """Initialize application on startup"""
+    try:
+        await bloom_manager.initialize()
+        await voice_processor.initialize()
+        logger.info("Application startup complete")
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
+
+
+async def shutdown_event():
+    """Cleanup on application shutdown"""
+    try:
+        await bloom_manager.shutdown()
+        await voice_processor.close()
+        logger.info("Application shutdown complete")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 
 async def websocket_endpoint(websocket: WebSocket):
@@ -174,6 +248,8 @@ async def websocket_endpoint(websocket: WebSocket):
 async def status_endpoint(request):
     """Health check and status endpoint."""
     try:
+        voice_available = await voice_processor.elevenlabs_client.is_available() if voice_processor.voice_enabled else False
+        
         return JSONResponse({
             "status": "healthy",
             "service": "Signal Bloom Backend",
@@ -181,6 +257,11 @@ async def status_endpoint(request):
             "connections": len(bloom_manager.connections),
             "signals": len(bloom_manager.signals),
             "timestamp": datetime.now().isoformat(),
+            "features": {
+                "voice_enabled": voice_processor.voice_enabled,
+                "voice_available": voice_available,
+                "database_enabled": True
+            },
             "uptime": "N/A"  # TODO: Add uptime tracking
         })
     except Exception as e:
@@ -188,6 +269,77 @@ async def status_endpoint(request):
         return JSONResponse({
             "status": "error",
             "message": "Health check failed"
+        }, status_code=500)
+
+
+async def voice_status_endpoint(request):
+    """Voice service status endpoint."""
+    try:
+        if not voice_processor.voice_enabled:
+            return JSONResponse({
+                "voice_enabled": False,
+                "message": "Voice processing not configured"
+            })
+        
+        available = await voice_processor.elevenlabs_client.is_available()
+        voices = await voice_processor.get_available_voices() if available else None
+        
+        return JSONResponse({
+            "voice_enabled": True,
+            "voice_available": available,
+            "voices_count": len(voices) if voices else 0,
+            "current_voice_id": voice_processor.elevenlabs_client.voice_id
+        })
+    except Exception as e:
+        logger.error(f"Error in voice status endpoint: {e}")
+        return JSONResponse({
+            "error": "Voice status check failed"
+        }, status_code=500)
+
+
+async def text_to_speech_endpoint(request):
+    """Convert text to speech endpoint."""
+    try:
+        if not voice_processor.voice_enabled:
+            return JSONResponse({
+                "error": "Voice processing not enabled"
+            }, status_code=503)
+        
+        # Get text from query params or JSON body
+        text = request.query_params.get('text')
+        if not text:
+            try:
+                body = await request.json()
+                text = body.get('text')
+            except:
+                pass
+        
+        if not text:
+            return JSONResponse({
+                "error": "No text provided"
+            }, status_code=400)
+        
+        # Generate speech
+        audio_data = await voice_processor.process_signal_to_speech(text)
+        
+        if audio_data:
+            from starlette.responses import Response
+            return Response(
+                audio_data,
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": "inline; filename=speech.mp3"
+                }
+            )
+        else:
+            return JSONResponse({
+                "error": "Failed to generate speech"
+            }, status_code=500)
+            
+    except Exception as e:
+        logger.error(f"Error in TTS endpoint: {e}")
+        return JSONResponse({
+            "error": "TTS processing failed"
         }, status_code=500)
 
 
@@ -270,14 +422,21 @@ async def frontend_endpoint(request):
 routes = [
     Route("/", frontend_endpoint),
     Route("/status", status_endpoint),
+    Route("/voice/status", voice_status_endpoint),
+    Route("/voice/tts", text_to_speech_endpoint, methods=["GET", "POST"]),
     WebSocketRoute("/ws", websocket_endpoint),
 ]
 
 # Add CORS middleware for development
-app = Starlette(debug=True, routes=routes)
+app = Starlette(debug=Config.DEBUG, routes=routes)
+
+# Add startup and shutdown events
+app.add_event_handler("startup", startup_event)
+app.add_event_handler("shutdown", shutdown_event)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict in production
+    allow_origins=Config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -289,9 +448,9 @@ if __name__ == "__main__":
     try:
         uvicorn.run(
             app, 
-            host="0.0.0.0", 
-            port=8000, 
-            log_level="info",
+            host=Config.HOST, 
+            port=Config.PORT, 
+            log_level=Config.LOG_LEVEL,
             access_log=True
         )
     except Exception as e:

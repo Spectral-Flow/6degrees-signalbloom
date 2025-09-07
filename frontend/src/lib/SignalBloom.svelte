@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import Signal from './Signal.svelte';
 	import SignalInput from './SignalInput.svelte';
+	import VoiceControls from './VoiceControls.svelte';
 	
 	let websocket;
 	let connected = false;
@@ -10,6 +11,7 @@
 	let reconnectAttempts = 0;
 	let maxReconnectAttempts = 5;
 	let reconnectTimeout;
+	let voiceControlsRef;
 
 	// WebSocket connection management with improved error handling
 	function connectWebSocket() {
@@ -40,6 +42,13 @@
 						// Limit stored signals to prevent memory issues
 						if (signals.length > 100) {
 							signals = signals.slice(0, 100);
+						}
+						
+						// Auto-play voice for new signals (optional feature)
+						if (voiceControlsRef && data.text) {
+							setTimeout(() => {
+								voiceControlsRef.playTextAsVoice(data.text);
+							}, 500); // Small delay to avoid overlapping voices
 						}
 					} else if (data.type === 'error') {
 						console.error('Server error:', data.message);
@@ -157,6 +166,12 @@
 	</header>
 	
 	<SignalInput {connected} on:signal={(e) => sendSignal(e.detail.text)} />
+	
+	<VoiceControls 
+		bind:this={voiceControlsRef}
+		{connected} 
+		on:voiceSignal={(e) => sendSignal(e.detail.text)} 
+	/>
 	
 	<div class="bloom-garden">
 		{#each signals as signal (signal.id)}

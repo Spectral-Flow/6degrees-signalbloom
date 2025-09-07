@@ -1,13 +1,13 @@
 <script>
 	import { createEventDispatcher } from 'svelte';
-	
+
 	export let connected = false;
-	
+
 	const dispatch = createEventDispatcher();
-	
+
 	let signalText = '';
 	let inputElement;
-	
+
 	function handleSubmit() {
 		const text = signalText.trim();
 		if (text && connected) {
@@ -16,7 +16,7 @@
 			inputElement.blur();
 		}
 	}
-	
+
 	function handleKeydown(event) {
 		if (event.key === 'Enter') {
 			event.preventDefault();
@@ -31,12 +31,12 @@
 			bind:this={inputElement}
 			bind:value={signalText}
 			on:keydown={handleKeydown}
-			placeholder={connected ? "Share a spark..." : "Connecting..."}
+			placeholder={connected ? 'Share a spark...' : 'Connecting...'}
 			disabled={!connected}
 			maxlength="100"
 			class="signal-input"
 		/>
-		<button 
+		<button
 			on:click={handleSubmit}
 			disabled={!connected || !signalText.trim()}
 			class="bloom-button"
@@ -62,7 +62,7 @@
 		width: 90%;
 		max-width: 500px;
 	}
-	
+
 	.input-wrapper {
 		display: flex;
 		gap: 0.5rem;
@@ -73,7 +73,7 @@
 		padding: 0.5rem;
 		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
 	}
-	
+
 	.signal-input {
 		flex: 1;
 		background: transparent;
@@ -85,20 +85,20 @@
 		outline: none;
 		transition: all 0.3s ease;
 	}
-	
+
 	.signal-input::placeholder {
 		color: rgba(255, 255, 255, 0.6);
 	}
-	
+
 	.signal-input:focus {
 		background: rgba(255, 255, 255, 0.1);
 	}
-	
+
 	.signal-input:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
-	
+
 	.bloom-button {
 		background: linear-gradient(135deg, #ff9a9e, #fecfef);
 		border: none;
@@ -113,23 +113,23 @@
 		transition: all 0.3s ease;
 		box-shadow: 0 4px 15px rgba(255, 154, 158, 0.3);
 	}
-	
+
 	.bloom-button:hover:not(:disabled) {
 		transform: scale(1.05);
 		box-shadow: 0 6px 20px rgba(255, 154, 158, 0.4);
 	}
-	
+
 	.bloom-button:active:not(:disabled) {
 		transform: scale(0.95);
 	}
-	
+
 	.bloom-button:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 		transform: none;
 		box-shadow: 0 2px 10px rgba(255, 154, 158, 0.2);
 	}
-	
+
 	.input-hint {
 		text-align: center;
 		margin-top: 0.5rem;
@@ -137,17 +137,17 @@
 		opacity: 0.7;
 		min-height: 1rem;
 	}
-	
+
 	.char-count {
 		color: rgba(255, 255, 255, 0.8);
 	}
-	
+
 	@media (max-width: 600px) {
 		.signal-input-container {
 			bottom: 1rem;
 			width: 95%;
 		}
-		
+
 		.signal-input {
 			font-size: 16px; /* Prevents zoom on iOS */
 		}

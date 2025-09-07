@@ -16,7 +16,7 @@ from starlette.middleware.cors import CORSMiddleware
 import uvicorn
 
 from config import Config
-from database import db_manager, Signal
+from database import db_manager, Signal, InnovationObject
 from voice import voice_processor
 
 # Configure logging
@@ -40,6 +40,9 @@ class SignalBloomManager:
         """Initialize database and load recent signals"""
         try:
             await db_manager.initialize()
+            
+            # Seed innovation data
+            await db_manager.seed_innovation_data()
             
             # Load recent signals from database
             db_signals = await db_manager.get_recent_signals(limit=100)
@@ -108,13 +111,18 @@ class SignalBloomManager:
             # Generate unique signal ID
             signal_id = f"signal_{len(self.signals)}_{datetime.now().timestamp()}"
             
+            # Check if signal text matches an innovation object
+            innovation_object = await db_manager.find_innovation_object(signal_data["text"])
+            innovation_object_id = innovation_object.id if innovation_object else None
+            
             # Prepare signal data
             processed_signal = {
                 "id": signal_id,
                 "text": signal_data["text"].strip(),
                 "timestamp": datetime.now().isoformat(),
                 "x": max(0, min(100, signal_data.get("x", 50))),
-                "y": max(0, min(100, signal_data.get("y", 50)))
+                "y": max(0, min(100, signal_data.get("y", 50))),
+                "innovation_object_id": innovation_object_id
             }
             
             # Save to database
@@ -125,7 +133,8 @@ class SignalBloomManager:
                 # Continue with broadcasting even if database save fails
             
             # Store in memory cache
-            self.signals[signal_id] = processed_signal
+            self.signals[signal_id] = processed_signal.copy()
+            self.signals[signal_id]['has_innovation_tree'] = innovation_object_id is not None
             
             # Cleanup old signals if needed
             if len(self.signals) >= self.max_signals:
@@ -134,7 +143,8 @@ class SignalBloomManager:
             # Broadcast to all connections
             message = json.dumps({
                 "type": "signal",
-                **processed_signal
+                **processed_signal,
+                "has_innovation_tree": innovation_object_id is not None
             })
             
             # Remove disconnected clients and send to active ones
@@ -343,6 +353,51 @@ async def text_to_speech_endpoint(request):
         }, status_code=500)
 
 
+async def innovation_tree_endpoint(request):
+    """Get innovation tree for a specific object."""
+    try:
+        object_id = request.path_params.get('object_id')
+        if not object_id:
+            return JSONResponse({
+                "error": "Object ID is required"
+            }, status_code=400)
+        
+        tree = await db_manager.get_innovation_tree(object_id)
+        if not tree:
+            return JSONResponse({
+                "error": "Innovation object not found"
+            }, status_code=404)
+        
+        return JSONResponse(tree)
+        
+    except Exception as e:
+        logger.error(f"Error in innovation tree endpoint: {e}")
+        return JSONResponse({
+            "error": "Failed to get innovation tree"
+        }, status_code=500)
+
+
+async def innovation_objects_endpoint(request):
+    """List available innovation objects."""
+    try:
+        async with await db_manager.get_session() as session:
+            from sqlalchemy import select
+            
+            stmt = select(InnovationObject).order_by(InnovationObject.name)
+            result = await session.execute(stmt)
+            objects = result.scalars().all()
+            
+            return JSONResponse({
+                "objects": [obj.to_dict() for obj in objects]
+            })
+            
+    except Exception as e:
+        logger.error(f"Error in innovation objects endpoint: {e}")
+        return JSONResponse({
+            "error": "Failed to get innovation objects"
+        }, status_code=500)
+
+
 async def frontend_endpoint(request):
     """Serve a simple test page for development."""
     html = """
@@ -424,6 +479,8 @@ routes = [
     Route("/status", status_endpoint),
     Route("/voice/status", voice_status_endpoint),
     Route("/voice/tts", text_to_speech_endpoint, methods=["GET", "POST"]),
+    Route("/api/innovation/objects", innovation_objects_endpoint),
+    Route("/api/innovation/tree/{object_id}", innovation_tree_endpoint),
     WebSocketRoute("/ws", websocket_endpoint),
 ]
 

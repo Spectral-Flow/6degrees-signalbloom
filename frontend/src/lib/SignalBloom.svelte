@@ -3,6 +3,7 @@
 	import Signal from './Signal.svelte';
 	import SignalInput from './SignalInput.svelte';
 	import VoiceControls from './VoiceControls.svelte';
+	import InnovationTree from './InnovationTree.svelte';
 	
 	let websocket;
 	let connected = false;
@@ -12,6 +13,10 @@
 	let maxReconnectAttempts = 5;
 	let reconnectTimeout;
 	let voiceControlsRef;
+
+	// Innovation tree state
+	let showInnovationTree = false;
+	let selectedInnovationObject = null;
 
 	// WebSocket connection management with improved error handling
 	function connectWebSocket() {
@@ -134,6 +139,17 @@
 		}
 	}
 	
+	function handleInnovationTreeOpen(event) {
+		const { objectId } = event.detail;
+		selectedInnovationObject = objectId;
+		showInnovationTree = true;
+	}
+	
+	function handleInnovationTreeClose() {
+		showInnovationTree = false;
+		selectedInnovationObject = null;
+	}
+	
 	onMount(() => {
 		connectWebSocket();
 		
@@ -175,7 +191,7 @@
 	
 	<div class="bloom-garden">
 		{#each signals as signal (signal.id)}
-			<Signal {signal} />
+			<Signal {signal} on:openInnovationTree={handleInnovationTreeOpen} />
 		{/each}
 		
 		{#if signals.length === 0}
@@ -186,6 +202,13 @@
 		{/if}
 	</div>
 </main>
+
+<!-- Innovation Tree Modal -->
+<InnovationTree 
+	objectId={selectedInnovationObject}
+	visible={showInnovationTree}
+	on:close={handleInnovationTreeClose}
+/>
 
 <style>
 	:global(body) {

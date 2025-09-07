@@ -1,7 +1,9 @@
 <script>
 	export let signal;
 	
-	import { onMount } from 'svelte';
+	import { onMount, createEventDispatcher } from 'svelte';
+	
+	const dispatch = createEventDispatcher();
 	
 	let element;
 	let mounted = false;
@@ -18,21 +20,40 @@
 		}, delay);
 	});
 	
+	function handleClick() {
+		if (signal.has_innovation_tree) {
+			dispatch('openInnovationTree', {
+				objectId: signal.innovation_object_id,
+				signalText: signal.text
+			});
+		}
+	}
+	
 	// Calculate position based on signal coordinates
 	$: style = `
 		left: ${signal.x}%; 
 		top: ${signal.y}%;
 	`;
+	
+	$: hasInnovationTree = signal.has_innovation_tree || false;
 </script>
 
 <div 
 	class="signal" 
+	class:innovation-enabled={hasInnovationTree}
 	bind:this={element}
 	{style}
-	title="{signal.text} - {new Date(signal.timestamp).toLocaleTimeString()}"
+	title="{signal.text} - {new Date(signal.timestamp).toLocaleTimeString()}{hasInnovationTree ? ' (Click to explore innovations)' : ''}"
+	on:click={handleClick}
+	on:keydown={(e) => e.key === 'Enter' && handleClick()}
+	role={hasInnovationTree ? "button" : "presentation"}
+	tabindex={hasInnovationTree ? "0" : "-1"}
 >
 	<div class="signal-core">
 		<div class="signal-text">{signal.text}</div>
+		{#if hasInnovationTree}
+			<div class="innovation-indicator">🌳</div>
+		{/if}
 	</div>
 	<div class="signal-rings">
 		<div class="ring ring-1"></div>
@@ -125,6 +146,51 @@
 	.signal:hover .ring {
 		animation-play-state: paused;
 		opacity: 0.6 !important;
+	}
+	
+	/* Innovation-enabled signals */
+	.signal.innovation-enabled {
+		cursor: pointer;
+	}
+	
+	.signal.innovation-enabled .signal-core {
+		background: linear-gradient(135deg, rgba(255, 215, 0, 0.9), rgba(255, 255, 255, 0.9));
+		border: 2px solid #ffd700;
+		position: relative;
+	}
+	
+	.signal.innovation-enabled:hover .signal-core {
+		transform: scale(1.15);
+		box-shadow: 0 8px 35px rgba(255, 215, 0, 0.4);
+		background: linear-gradient(135deg, rgba(255, 215, 0, 1), rgba(255, 255, 255, 0.95));
+	}
+	
+	.innovation-indicator {
+		position: absolute;
+		top: -8px;
+		right: -8px;
+		width: 20px;
+		height: 20px;
+		background: #ffd700;
+		border-radius: 50%;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 10px;
+		border: 2px solid white;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+		animation: innovation-pulse 2s ease-in-out infinite;
+	}
+	
+	@keyframes innovation-pulse {
+		0%, 100% {
+			transform: scale(1);
+			opacity: 1;
+		}
+		50% {
+			transform: scale(1.1);
+			opacity: 0.8;
+		}
 	}
 	
 	@keyframes bloom-ripple {

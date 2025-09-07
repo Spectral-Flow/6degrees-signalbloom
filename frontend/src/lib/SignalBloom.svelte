@@ -4,7 +4,7 @@
 	import SignalInput from './SignalInput.svelte';
 	import VoiceControls from './VoiceControls.svelte';
 	import InnovationTree from './InnovationTree.svelte';
-	
+
 	let websocket;
 	let connected = false;
 	let signals = [];
@@ -28,27 +28,27 @@
 
 			const wsUrl = getWebSocketUrl();
 			websocket = new WebSocket(wsUrl);
-			
+
 			websocket.onopen = () => {
 				connected = true;
 				connectionStatus = 'Connected to Signal Bloom';
 				reconnectAttempts = 0; // Reset counter on successful connection
 				console.log('WebSocket connected successfully');
 			};
-			
+
 			websocket.onmessage = (event) => {
 				try {
 					const data = JSON.parse(event.data);
-					
+
 					if (data.type === 'signal') {
 						// Add new signal to the front of the array for latest-first display
 						signals = [data, ...signals];
-						
+
 						// Limit stored signals to prevent memory issues
 						if (signals.length > 100) {
 							signals = signals.slice(0, 100);
 						}
-						
+
 						// Auto-play voice for new signals (optional feature)
 						if (voiceControlsRef && data.text) {
 							setTimeout(() => {
@@ -63,10 +63,10 @@
 					console.error('Error parsing WebSocket message:', error);
 				}
 			};
-			
+
 			websocket.onclose = (event) => {
 				connected = false;
-				
+
 				if (event.wasClean) {
 					connectionStatus = 'Disconnected';
 					console.log('WebSocket closed cleanly');
@@ -76,7 +76,7 @@
 					attemptReconnection();
 				}
 			};
-			
+
 			websocket.onerror = (error) => {
 				console.error('WebSocket error:', error);
 				connected = false;
@@ -102,9 +102,9 @@
 		if (reconnectAttempts < maxReconnectAttempts) {
 			const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff
 			reconnectAttempts++;
-			
+
 			connectionStatus = `Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`;
-			
+
 			reconnectTimeout = setTimeout(() => {
 				connectWebSocket();
 			}, delay);
@@ -117,7 +117,7 @@
 		reconnectAttempts = 0;
 		connectWebSocket();
 	}
-	
+
 	// Send signal to backend with error handling
 	function sendSignal(text) {
 		if (websocket && connected && websocket.readyState === WebSocket.OPEN) {
@@ -126,7 +126,7 @@
 					type: 'signal',
 					text: text.trim(),
 					x: Math.random() * 90 + 5, // 5-95% to keep signals within bounds
-					y: Math.random() * 90 + 5
+					y: Math.random() * 90 + 5,
 				};
 				websocket.send(JSON.stringify(signal));
 			} catch (error) {
@@ -138,21 +138,21 @@
 			console.warn('Cannot send signal: WebSocket not connected');
 		}
 	}
-	
+
 	function handleInnovationTreeOpen(event) {
 		const { objectId } = event.detail;
 		selectedInnovationObject = objectId;
 		showInnovationTree = true;
 	}
-	
+
 	function handleInnovationTreeClose() {
 		showInnovationTree = false;
 		selectedInnovationObject = null;
 	}
-	
+
 	onMount(() => {
 		connectWebSocket();
-		
+
 		// Cleanup on component destroy
 		return () => {
 			if (reconnectTimeout) {
@@ -174,26 +174,24 @@
 				{connectionStatus}
 			</div>
 			{#if !connected && reconnectAttempts >= maxReconnectAttempts}
-				<button class="reconnect-btn" on:click={resetConnection}>
-					↻ Reconnect
-				</button>
+				<button class="reconnect-btn" on:click={resetConnection}> ↻ Reconnect </button>
 			{/if}
 		</div>
 	</header>
-	
+
 	<SignalInput {connected} on:signal={(e) => sendSignal(e.detail.text)} />
-	
-	<VoiceControls 
+
+	<VoiceControls
 		bind:this={voiceControlsRef}
-		{connected} 
-		on:voiceSignal={(e) => sendSignal(e.detail.text)} 
+		{connected}
+		on:voiceSignal={(e) => sendSignal(e.detail.text)}
 	/>
-	
+
 	<div class="bloom-garden">
 		{#each signals as signal (signal.id)}
 			<Signal {signal} on:openInnovationTree={handleInnovationTreeOpen} />
 		{/each}
-		
+
 		{#if signals.length === 0}
 			<div class="empty-garden">
 				<p>🌱</p>
@@ -204,7 +202,7 @@
 </main>
 
 <!-- Innovation Tree Modal -->
-<InnovationTree 
+<InnovationTree
 	objectId={selectedInnovationObject}
 	visible={showInnovationTree}
 	on:close={handleInnovationTreeClose}
@@ -220,14 +218,14 @@
 		min-height: 100vh;
 		overflow-x: hidden;
 	}
-	
+
 	.bloom-container {
 		max-width: 100vw;
 		height: 100vh;
 		position: relative;
 		overflow: hidden;
 	}
-	
+
 	.bloom-header {
 		position: fixed;
 		top: 0;
@@ -240,7 +238,7 @@
 		text-align: center;
 		border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 	}
-	
+
 	.bloom-header h1 {
 		margin: 0;
 		font-size: 2.5rem;
@@ -252,19 +250,24 @@
 		background-clip: text;
 		animation: gradient-shift 3s ease infinite;
 	}
-	
+
 	@keyframes gradient-shift {
-		0%, 100% { background-position: 0% 50%; }
-		50% { background-position: 100% 50%; }
+		0%,
+		100% {
+			background-position: 0% 50%;
+		}
+		50% {
+			background-position: 100% 50%;
+		}
 	}
-	
+
 	.subtitle {
 		margin: 0.5rem 0;
 		opacity: 0.8;
 		font-size: 1rem;
 		font-weight: 300;
 	}
-	
+
 	.status-container {
 		display: flex;
 		align-items: center;
@@ -272,7 +275,7 @@
 		gap: 1rem;
 		flex-wrap: wrap;
 	}
-	
+
 	.status {
 		font-size: 0.9rem;
 		padding: 0.25rem 1rem;
@@ -280,17 +283,17 @@
 		display: inline-block;
 		transition: all 0.3s ease;
 	}
-	
+
 	.status.connected {
 		background: rgba(0, 255, 0, 0.2);
 		color: #90ee90;
 	}
-	
+
 	.status.disconnected {
 		background: rgba(255, 0, 0, 0.2);
 		color: #ffb3b3;
 	}
-	
+
 	.reconnect-btn {
 		background: linear-gradient(135deg, #667eea, #764ba2);
 		border: none;
@@ -302,16 +305,16 @@
 		transition: all 0.3s ease;
 		box-shadow: 0 2px 10px rgba(102, 126, 234, 0.3);
 	}
-	
+
 	.reconnect-btn:hover {
 		transform: translateY(-1px);
 		box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
 	}
-	
+
 	.reconnect-btn:active {
 		transform: translateY(0);
 	}
-	
+
 	.bloom-garden {
 		position: absolute;
 		top: 0;
@@ -320,11 +323,7 @@
 		height: 100%;
 		pointer-events: none;
 	}
-	
-	.bloom-garden .signal {
-		pointer-events: all;
-	}
-	
+
 	.empty-garden {
 		position: absolute;
 		top: 50%;
@@ -335,20 +334,27 @@
 		font-size: 1.2rem;
 		pointer-events: none;
 	}
-	
+
 	.empty-garden p:first-child {
 		font-size: 4rem;
 		margin: 0;
 		animation: gentle-pulse 2s ease-in-out infinite;
 	}
-	
+
 	.empty-garden p:last-child {
 		margin: 1rem 0 0 0;
 		font-weight: 300;
 	}
-	
+
 	@keyframes gentle-pulse {
-		0%, 100% { opacity: 0.6; transform: scale(1); }
-		50% { opacity: 0.8; transform: scale(1.05); }
+		0%,
+		100% {
+			opacity: 0.6;
+			transform: scale(1);
+		}
+		50% {
+			opacity: 0.8;
+			transform: scale(1.05);
+		}
 	}
 </style>

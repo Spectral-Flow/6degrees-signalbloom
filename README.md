@@ -351,14 +351,14 @@ npm run dev
 ```bash
 # Backend tests
 cd backend
-python -m pytest
+python test_integration.py
 
 # Frontend tests
 cd frontend
 npm test
 
-# Integration tests
-npm run test:integration
+# Full application test
+./test.sh
 ```
 
 ## Future Enhancements
